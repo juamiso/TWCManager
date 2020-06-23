@@ -119,7 +119,10 @@ import sysv_ipc
 import json
 from datetime import datetime
 import threading
-
+#Required to support modbus communication with photovoltaic inverters
+from pymodbus.constants import Endian
+from pymodbus.payload import BinaryPayloadDecoder
+from pymodbus.client.sync import ModbusTcpClient as ModbusClient
 
 ##########################
 #
@@ -218,7 +221,7 @@ onlyChargeMultiCarsAtHome = True
 # North American 240V grid. In other words, during car charging, you want your
 # utility meter to show a value close to 0kW meaning no energy is being sent to
 # or from the grid.
-greenEnergyAmpsOffset = 0
+greenEnergyAmpsOffset = -1
 
 # Choose how much debugging info to output.
 # 0 is no output other than errors.
@@ -1137,7 +1140,7 @@ def car_api_charge(charge):
                                     print(time_now() + ": Car API returned '"
                                           + error
                                           + "' when trying to start charging.  Try again in 1 minute.")
-                                time.sleep(10) #Was 60s JMS
+                                time.sleep(60)
                                 foundKnownError = True
                                 break
                         if(foundKnownError):
@@ -1233,6 +1236,7 @@ def background_tasks_thread():
     while True:
         task = backgroundTasksQueue.get()
 
+        #print("Background task queue command %s "%(task['cmd']))
         if(task['cmd'] == 'charge'):
             # car_api_charge does nothing if it's been under 60 secs since it
             # was last used so we shouldn't have to worry about calling this
@@ -1280,15 +1284,18 @@ def check_green_energy():
     # operation from taking over 60 seconds.
     #greenEnergyData = run_process('curl -s -m 60 "http://192.168.13.58/history/export.csv?T=1&D=0&M=1&C=1"')
     Photovoltaic = 0
-    Smartmeter=0
+    SmartMeter=0
     HouseBatt= 0
     try:
-      Photovoltaic = run_process('curl -s -m 5 "http://192.168.0.21:8087/getPlainValue/vis.0.PV"')
-      SmartMeter = run_process('curl -s -m 5 "http://192.168.0.21:8087/getPlainValue/vis.0.Grid"')
-      HouseBatt = run_process('curl -s -m 5 "http://192.168.0.21:8087/getPlainValue/vis.0.Batt_Discharge"')
+     HouseBatt = int(BinaryPayloadDecoder.fromRegisters(client.read_holding_registers(40070-1,2,unit=1).registers, byteorder=Endian.Big, wordorder=Endian.Little).decode_32bit_int())
+     Photovoltaic= int(BinaryPayloadDecoder.fromRegisters(client.read_holding_registers(40068-1,2,unit=1).registers, byteorder=Endian.Big, wordorder=Endian.Little).decode_32bit_int())
+     SmartMeter = int(BinaryPayloadDecoder.fromRegisters(client.read_holding_registers(40074-1,2,unit=1).registers, byteorder=Endian.Big, wordorder=Endian.Little).decode_32bit_int())
     except:
-      pass
+     print("E3DC not responding on Modbus request ")
+    pass
     #   MTU, Time, Power, Cost, Voltage
+    print("Smartmeter %d Housebatt %d "% (SmartMeter,HouseBatt))
+
     #   Solar,11/11/2017 14:20:43,-2.957,-0.29,124.3
     # The only part we care about is -2.957 which is negative
     # kW currently being generated. When 0kW is generated, the
@@ -1296,10 +1303,10 @@ def check_green_energy():
     # below.
     #m = re.search(b'^Solar,[^,]+,-?([^, ]+),', greenEnergyData, re.MULTILINE)
     SmartMeter = -int(SmartMeter) # - means surplus
-    HouseBatt = int(float(HouseBatt)) #If Powerwall discharges, subtract this from surplus
+    HouseBatt = -int(float(HouseBatt)) #If Powerwall discharges, subtract this from surplus
     
     greenEnergyData = SmartMeter - HouseBatt + total_amps_actual_all_twcs()*225
-    print("Smarmeter %d Housebatt %d "% (SmartMeter,HouseBatt))
+    print("Smartmeter %d Housebatt %d "% (SmartMeter,HouseBatt))
 
     
     m = int(greenEnergyData) 
@@ -1426,7 +1433,7 @@ class CarApiVehicle:
                                 print(time_now() + ": Car API returned '"
                                       + error
                                       + "' when trying to get GPS location.  Try again in 1 minute.")
-                            time.sleep(10) #Was 60 JMS
+                            time.sleep(60)
                             foundKnownError = True
                             break
                     if(foundKnownError):
@@ -2496,6 +2503,9 @@ ser = serial.Serial(rs485Adapter, baud, timeout=0)
 
 load_settings()
 
+ip='192.168.178.39' #This is the ip from your photovoltaic inverter
+client = ModbusClient(ip,port=502)
+client.connect()
 
 # Create a background thread to handle tasks that take too long on the main
 # thread.  For a primer on threads in Python, see:
@@ -3458,6 +3468,8 @@ backgroundTasksQueue.join()
 
 ser.close()
 
+#Close MODBUS too
+client.close()
 #
 # End main program
 #
