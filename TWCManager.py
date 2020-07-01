@@ -119,8 +119,10 @@ import sysv_ipc
 import json
 from datetime import datetime
 import threading
-
-
+import requests as req
+from pymodbus.constants import Endian
+from pymodbus.payload import BinaryPayloadDecoder
+from pymodbus.client.sync import ModbusTcpClient as ModbusClient
 ##########################
 #
 # Configuration parameters
@@ -218,7 +220,7 @@ onlyChargeMultiCarsAtHome = True
 # North American 240V grid. In other words, during car charging, you want your
 # utility meter to show a value close to 0kW meaning no energy is being sent to
 # or from the grid.
-greenEnergyAmpsOffset = 0
+greenEnergyAmpsOffset = -1
 
 # Choose how much debugging info to output.
 # 0 is no output other than errors.
@@ -227,7 +229,7 @@ greenEnergyAmpsOffset = 0
 # 9 includes raw RS-485 messages transmitted and received (2-3 per sec)
 # 10 is all info.
 # 11 is more than all info.  ;)
-debugLevel = 1
+debugLevel = 10
 
 # Choose whether to display milliseconds after time on each line of debug info.
 displayMilliseconds = False
@@ -1280,14 +1282,30 @@ def check_green_energy():
     # operation from taking over 60 seconds.
     #greenEnergyData = run_process('curl -s -m 60 "http://192.168.13.58/history/export.csv?T=1&D=0&M=1&C=1"')
     Photovoltaic = 0
-    Smartmeter=0
+    SmartMeter=0
     HouseBatt= 0
+    #url_string = 'http://grafa.my-router.de:8086/write?db=iobroker'
+    #url_string = 'http://grafa.my-router.de:8086/write?db=iobroker'
+    url_string = 'http://192.168.0.4:8086/write?db=iobroker'
+    data_string = 'TWCMagager.CurrentChargingPower,from=TWCManager value=' + str(total_amps_actual_all_twcs()*225)
+    #myToken = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VybmFtZSI6InBpIiwiZXhwIjoyMjM4ODgzMjAwfQ.xOwi_jQTLG2T41PF3NT54pKfpTAFfNFl6WldoivzwP8'
+    #header_string = {'Authorization': 'Bearer {}'.format(myToken)}
+    ip='192.168.0.70' #This is the ip from your inverter being connected via TCP Modb
+    client = ModbusClient(ip,port=502)
     try:
-      Photovoltaic = run_process('curl -s -m 5 "http://192.168.0.21:8087/getPlainValue/vis.0.PV"')
-      SmartMeter = run_process('curl -s -m 5 "http://192.168.0.21:8087/getPlainValue/vis.0.Grid"')
-      HouseBatt = run_process('curl -s -m 5 "http://192.168.0.21:8087/getPlainValue/vis.0.Batt_Discharge"')
+      client.connect()
+      Photovoltaic = int(BinaryPayloadDecoder.fromRegisters(client.read_holding_registers(40092-1,2,unit=1).registers, byteorder=Endian.Big, wordorder=Endian.Big).decode_32bit_float())
+      SmartMeter = int(BinaryPayloadDecoder.fromRegisters(client.read_holding_registers(40098-1,2,unit=240).registers, byteorder=Endian.Big, wordorder=Endian.Big).decode_32bit_float())
+      #Fix this by reading from influxdb or something else
+      #HouseBatt = run_process('curl -s -m 5 "http://192.168.0.21:8087/getPlainValue/vis.0.Batt_Discharge"') #DIY Powerwall
+     # req.post(url_string, data=data_string, headers=header_string)
+      req.post(url_string, data=data_string)
     except:
-      pass
+     print('Failed to read Greenenergy') 
+     pass
+    client.close()
+
+    
     #   MTU, Time, Power, Cost, Voltage
     #   Solar,11/11/2017 14:20:43,-2.957,-0.29,124.3
     # The only part we care about is -2.957 which is negative
@@ -1299,6 +1317,8 @@ def check_green_energy():
     HouseBatt = int(float(HouseBatt)) #If Powerwall discharges, subtract this from surplus
     
     greenEnergyData = SmartMeter - HouseBatt + total_amps_actual_all_twcs()*225
+    if greenEnergyData > int(Photovoltaic) :
+      greenEnergyData = int(Photovoltaic) #If for some time isses, limit 
     print("Smarmeter %d Housebatt %d "% (SmartMeter,HouseBatt))
 
     
@@ -1958,7 +1978,7 @@ class TWCSlave:
         else:
             if(nonScheduledAmpsMax > -1):
                 maxAmpsToDivideAmongSlaves = nonScheduledAmpsMax
-            elif(now - timeLastGreenEnergyCheck > 60):
+            elif(now - timeLastGreenEnergyCheck > 30):
                 timeLastGreenEnergyCheck = now
 
                 # Don't bother to check solar generation before 6am or after
@@ -2830,7 +2850,8 @@ while True:
         except sysv_ipc.BusyError:
             # No web message is waiting.
             pass
-
+        except sysv_ipc.ExistentialError:
+            pass
         ########################################################################
         # See if there's an incoming message on the RS485 interface.
 
